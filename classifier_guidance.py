@@ -9,8 +9,6 @@ import imageio
 from tqdm import tqdm
 import contextlib
 
-torch.set_printoptions(linewidth=70)
-
 
 class ClassifierGuidedDiffusion(nn.Module):
     def get_linear_beta_schdule(self):
@@ -23,11 +21,11 @@ class ClassifierGuidedDiffusion(nn.Module):
 
     def __init__(
         self,
-        model,
+        unet,
         classifier,
         img_size,
         device,
-        classifier_scale=1,
+        classifier_scale=10,
         image_channels=3,
         n_diffusion_steps=1000,
         init_beta=0.0001,
@@ -35,7 +33,7 @@ class ClassifierGuidedDiffusion(nn.Module):
     ):
         super().__init__()
 
-        self.model = model.to(device)
+        self.unet = unet.to(device)
         self.classifier = classifier.to(device)
 
         self.img_size = img_size
@@ -84,15 +82,23 @@ class ClassifierGuidedDiffusion(nn.Module):
         return noisy_image
 
     def forward(self, noisy_image, diffusion_step):
-        return self.model(noisy_image=noisy_image, diffusion_step=diffusion_step)
+        return self.unet(noisy_image=noisy_image, diffusion_step=diffusion_step)
 
     def get_classifier_grad(self, noisy_image, diffusion_step, label):
         with torch.enable_grad():
-            x_in = noisy_image.detach().requires_grad_(True)
-            out = self.classifier(x_in, diffusion_step)
+            out = self.classifier(
+                noisy_image=noisy_image.detach(),
+                diffusion_step=diffusion_step,
+                label=label,
+            )
+            # x_in = torch.randn(4, 3, 32, 32, requires_grad=True)
+            # out = torch.randn(4, 1000, requires_grad=True)
+            # label = torch.randint(0, 1000, (4,))
             log_prob = F.log_softmax(out, dim=-1)
             selected = log_prob[range(log_prob.size(0)), label]
-            return torch.autograd.grad(selected.sum(), x_in)[0]
+            # "$\nabla_{x_{t}}\log{p_{\phi}}(y \vert x)$"
+            noisy_image.requires_grad_()
+            return torch.autograd.grad(outputs=selected.sum(), inputs=noisy_image)[0]
 
     @torch.inference_mode()
     def take_denoising_step(self, noisy_image, diffusion_step_idx, label):
@@ -109,10 +115,10 @@ class ClassifierGuidedDiffusion(nn.Module):
         model_var = beta_t
 
         grad = self.get_classifier_grad(
-            noisy_image==noisy_image,
-            diffusion_step=diffusion_step,
-            label=label,
+            noisy_image=noisy_image, diffusion_step=diffusion_step, label=label,
         )
+        # "x_{t - 1}
+        # = $\mathcal{N}(\mu + s\Sigma\nabla_{x_{t}}\log{p_{\phi}}(y \vert x), \Sigma)$"
         new_model_mean = model_mean + self.classifier_scale * model_var * grad
 
         if diffusion_step_idx > 0:
@@ -123,6 +129,24 @@ class ClassifierGuidedDiffusion(nn.Module):
                 device=self.device,
             )
         return new_model_mean + (model_var ** 0.5) * rand_noise
+
+    @torch.inference_mode()
+    def take_denoising_ddim_step(self, noisy_image, diffusion_step_idx, label):
+        diffusion_step = self.batchify_diffusion_steps(
+            diffusion_step_idx=diffusion_step_idx, batch_size=noisy_image.size(0),
+        )
+        alpha_bar_t = self.index(self.alpha_bar, diffusion_step=diffusion_step)
+        pred_noise = self(noisy_image=noisy_image.detach(), diffusion_step=diffusion_step)
+        grad = self.get_classifier_grad(
+            noisy_image=noisy_image, diffusion_step=diffusion_step, label=label,
+        )
+        new_pred_noise = pred_noise - (1 - alpha_bar_t) ** 0.5 * grad
+        # "$x_{t - 1}
+        # = \sqrt{\bar{\alpha}_{t - 1}}\Bigg(\frac{x_{t} - \sqrt{1 - \bar{\alpha}_{t}}\hat{\epsilon}}{\sqrt{\bar{\alpha}_{t}}}\Bigg)
+        # + \sqrt{1 - \bar{\alpha}_{t - 1}}\hat{\epsilon}$"
+        return (prev_alpha_bar_t ** 0.5) * (
+            (noisy_image -  ((1 - alpha_bar_t) ** 0.5) * new_pred_noise) / ((alpha_bar_t) ** 0.5)
+        ) + (1 - prev_alpha_bar_t) * new_pred_noise
 
     def perform_denoising_process(self, noisy_image, start_diffusion_step_idx, n_frames=None):
         if n_frames is not None:
