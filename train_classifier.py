@@ -3,11 +3,9 @@ from torch.optim import AdamW
 import gc
 import argparse
 from pathlib import Path
-import math
 from time import time
 from tqdm import tqdm
 from timm.scheduler import CosineLRScheduler
-from copy import deepcopy
 import wandb
 
 from utils import (
@@ -57,12 +55,12 @@ class Trainer(object):
         self.save_dir = Path(save_dir)
         self.device = device
 
-        self.run = wandb.init(project="DDPM")
+        self.run = wandb.init(project="Classifier-Guidance")
 
         self.ckpt_path = self.save_dir/"ckpt.pth"
 
     def train_for_one_epoch(
-        self, epoch, diffusion_model, classifier, optim, scaler,
+        self, epoch, model, classifier, optim, scaler,
     ):
         train_loss = 0
         pbar = tqdm(self.train_dl, leave=False)
@@ -72,9 +70,9 @@ class Trainer(object):
             ori_image = ori_image.to(self.device)
             label = label.to(self.device)
 
-            rand_diffusion_step = diffusion_model.sample_diffusion_step(batch_size=ori_image.size(0))
-            rand_noise = diffusion_model.sample_noise(batch_size=ori_image.size(0))
-            noisy_image = diffusion_model.perform_diffusion_process(
+            rand_diffusion_step = model.sample_diffusion_step(batch_size=ori_image.size(0))
+            rand_noise = model.sample_noise(batch_size=ori_image.size(0))
+            noisy_image = model.perform_diffusion_process(
                 ori_image=ori_image,
                 diffusion_step=rand_diffusion_step,
                 rand_noise=rand_noise,
@@ -99,8 +97,8 @@ class Trainer(object):
         return train_loss
 
     @torch.inference_mode()
-    def validate(self, diffusion_model, classifier):
-        val_loss = 0
+    def validate(self, model, classifier):
+        val_acc = 0
         pbar = tqdm(self.val_dl, leave=False)
         for ori_image, label in pbar:
             pbar.set_description("Validating...")
@@ -108,20 +106,21 @@ class Trainer(object):
             ori_image = ori_image.to(self.device)
             label = label.to(self.device)
 
-            rand_diffusion_step = diffusion_model.sample_diffusion_step(batch_size=ori_image.size(0))
-            rand_noise = diffusion_model.sample_noise(batch_size=ori_image.size(0))
-            noisy_image = diffusion_model.perform_diffusion_process(
+            rand_diffusion_step = model.sample_diffusion_step(batch_size=ori_image.size(0))
+            rand_noise = model.sample_noise(batch_size=ori_image.size(0))
+            noisy_image = model.perform_diffusion_process(
                 ori_image=ori_image,
                 diffusion_step=rand_diffusion_step,
                 rand_noise=rand_noise,
             )
-            loss = classifier.get_loss(
+            acc = classifier.get_acc(
                 noisy_image=noisy_image,
                 diffusion_step=rand_diffusion_step,
                 label=label,
+                k=1,
             )
-            val_loss += (loss.item() / len(self.val_dl))
-        return val_loss
+            val_acc += (acc.item() / len(self.val_dl))
+        return val_acc
 
     @staticmethod
     def save_model_params(model, save_path):
@@ -129,13 +128,13 @@ class Trainer(object):
         torch.save(modify_state_dict(model.state_dict()), str(save_path))
         print(f"Saved model params as '{str(save_path)}'.")
 
-    def save_ckpt(self, epoch, model, optim, min_val_loss, scaler):
+    def save_ckpt(self, epoch, model, optim, max_val_acc, scaler):
         self.ckpt_path.parent.mkdir(parents=True, exist_ok=True)
         ckpt = {
             "epoch": epoch,
             "model": modify_state_dict(model.state_dict()),
             "optimizer": optim.state_dict(),
-            "min_val_loss": min_val_loss,
+            "max_val_acc": max_val_acc,
         }
         if scaler is not None:
             ckpt["scaler"] = scaler.state_dict()
@@ -144,7 +143,7 @@ class Trainer(object):
     def train(
         self,
         n_epochs,
-        diffusion_model,
+        model,
         classifier,
         optim,
         scaler,
@@ -162,38 +161,38 @@ class Trainer(object):
         )
 
         init_epoch = 0
-        min_val_loss = math.inf
+        max_val_acc = 0
         for epoch in range(init_epoch + 1, n_epochs + 1):
             start_time = time()
             train_loss = self.train_for_one_epoch(
                 epoch=epoch,
-                diffusion_model=diffusion_model,
+                model=model,
                 classifier=classifier,
                 optim=optim,
                 scaler=scaler,
             )
-            val_loss = self.validate(
-                diffusion_model=diffusion_model, classifier=classifier,
+            val_acc = self.validate(
+                model=model, classifier=classifier,
             )
-            if val_loss < min_val_loss:
-                model_params_path = str(self.save_dir/f"epoch={epoch}-val_loss={val_loss:.4f}.pth")
+            if val_acc > max_val_acc:
+                model_params_path = str(self.save_dir/f"epoch={epoch}-val_acc={val_acc:.3f}.pth")
                 self.save_model_params(model=classifier, save_path=model_params_path)
-                min_val_loss = val_loss
+                max_val_acc = val_acc
 
             self.save_ckpt(
                 epoch=epoch,
                 model=classifier,
                 optim=optim,
-                min_val_loss=min_val_loss,
+                max_val_acc=max_val_acc,
                 scaler=scaler,
             )
 
             log = f"[ {get_elapsed_time(start_time)} ]"
             log += f"[ {epoch}/{n_epochs} ]"
-            log += f"[ Train loss: {train_loss:.4f} ]"
-            log += f"[ Val loss: {val_loss:.4f} | Best: {min_val_loss:.4f} ]"
+            log += f"[ Train loss: {train_loss:.6f} ]"
+            log += f"[ Val acc: {val_acc:.3f} | Best: {max_val_acc:.3f} ]"
             wandb.log(
-                {"Train loss": train_loss, "Val loss": val_loss, "Min val loss": min_val_loss},
+                {"Train loss": train_loss, "Val acc": val_acc, "Max val loss": max_val_acc},
                 step=epoch,
             )
             print(log)
@@ -219,6 +218,7 @@ def main():
         n_cpus=args.N_CPUS,
         seed=args.SEED,
     )
+    N_CLASSES = 10
     trainer = Trainer(
         train_dl=train_dl,
         val_dl=val_dl,
@@ -227,20 +227,20 @@ def main():
     )
 
     unet = UNet(
-        n_classes=10,
+        n_classes=N_CLASSES,
         channels=64,
         channel_mults=[1, 2, 2, 2],
         attns=[False, True, False, False],
         n_res_blocks=2,
     )
     classifier = Classifier(
-        n_classes=10,
+        n_classes=N_CLASSES,
         channels=64,
         channel_mults=[1, 2, 2, 2],
         attns=[False, True, False, False],
         n_res_blocks=2,
     ).to(DEVICE)
-    diffusion_model = ClassifierGuidedDiffusion(
+    model = ClassifierGuidedDiffusion(
         unet=unet,
         classifier=classifier,
         img_size=args.IMG_SIZE,
@@ -252,7 +252,7 @@ def main():
 
     trainer.train(
         n_epochs=args.N_EPOCHS,
-        diffusion_model=diffusion_model,
+        model=model,
         classifier=classifier,
         optim=optim,
         scaler=scaler,

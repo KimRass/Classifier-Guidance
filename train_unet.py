@@ -22,12 +22,14 @@ from utils import (
 )
 from data import get_train_and_val_dls
 from unet import UNet
-from ddpm import DDPM
+from classifier import Classifier
+from classifier_guidance import ClassifierGuidedDiffusion
 
 
 def get_args():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--classifier_params", type=str, required=True)
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
     parser.add_argument("--n_epochs", type=int, required=True)
@@ -35,7 +37,7 @@ def get_args():
     parser.add_argument("--lr", type=float, required=True)
     parser.add_argument("--n_cpus", type=int, required=True)
     parser.add_argument("--n_warmup_steps", type=int, required=True)
-    parser.add_argument("--img_size", type=int, required=True)
+    parser.add_argument("--img_size", type=int, default=32, required=False)
 
     parser.add_argument("--seed", type=int, default=223, required=False)
 
@@ -49,57 +51,32 @@ def get_args():
     return args
 
 
-class EMA:
-    def __init__(self, weight, model):
-        super().__init__()
-
-        self.weight = weight
-
-        self.ema_model = deepcopy(model)
-        self.ema_model.eval()
-        self.ema_model.requires_grad_(False)
-
-        self.cur_step = 0
-
-    def _reset_model_prams(self, cur_model):
-        self.ema_model.load_state_dict(cur_model.state_dict())
-
-    def _get_ema(self, x, y):
-        if x is None:
-            return y
-        return self.weight * x + (1 - self.weight) * y
-
-    def _update_model_params(self, cur_model):
-        for cur_param, ema_param in zip(cur_model.parameters(), self.ema_model.parameters()):
-            ema_param.data = self._get_ema(ema_param.data, cur_param.data)
-
-    def step(self, cur_model, start_step=2000):
-        if self.cur_step < start_step:
-            self._reset_model_prams(cur_model)
-        else:
-            self._update_model_params(cur_model)
-        self.cur_step += 1
-
-
 class Trainer(object):
-    def __init__(self, train_dl, val_dl, save_dir, device):
+    def __init__(self, n_classes, train_dl, val_dl, save_dir, device):
+        self.n_classes = n_classes
         self.train_dl = train_dl
         self.val_dl = val_dl
         self.save_dir = Path(save_dir)
         self.device = device
 
-        self.run = wandb.init(project="DDPM")
+        # self.run = wandb.init(project="Classifier-Guidance-Classifier")
 
         self.ckpt_path = self.save_dir/"ckpt.pth"
+
+        self.test_label = torch.arange(
+            self.n_classes, dtype=torch.int32, device=self.device,
+        ).repeat_interleave(10)
 
     def train_for_one_epoch(self, epoch, model, optim, scaler):
         train_loss = 0
         pbar = tqdm(self.train_dl, leave=False)
-        for step_idx, ori_image in enumerate(pbar): # "$x_{0} \sim q(x_{0})$"
+        for step_idx, (ori_image, label) in enumerate(pbar):
             pbar.set_description("Training...")
 
             ori_image = ori_image.to(self.device)
-            loss = model.get_loss(ori_image)
+            label = label.to(self.device)
+
+            loss = model.get_unet_loss(ori_image=ori_image, label=label)
             train_loss += (loss.item() / len(self.train_dl))
 
             optim.zero_grad()
@@ -110,7 +87,6 @@ class Trainer(object):
             else:
                 loss.backward()
                 optim.step()
-            # self.ema.step(cur_model=model)
 
             self.scheduler.step((epoch - 1) * len(self.train_dl) + step_idx)
         return train_loss
@@ -119,11 +95,13 @@ class Trainer(object):
     def validate(self, model):
         val_loss = 0
         pbar = tqdm(self.val_dl, leave=False)
-        for ori_image in pbar:
+        for ori_image, label in pbar:
             pbar.set_description("Validating...")
 
             ori_image = ori_image.to(self.device)
-            loss = model.get_loss(ori_image.detach())
+            label = label.to(self.device)
+
+            loss = model.get_unet_loss(ori_image=ori_image, label=label)
             val_loss += (loss.item() / len(self.val_dl))
         return val_loss
 
@@ -145,23 +123,16 @@ class Trainer(object):
             ckpt["scaler"] = scaler.state_dict()
         torch.save(ckpt, str(self.ckpt_path))
 
-    @torch.inference_mode()
-    def test_sampling(self, epoch, model, batch_size):
-        gen_image = model.sample(batch_size=batch_size)
-        gen_grid = image_to_grid(gen_image, n_cols=int(batch_size ** 0.5))
-        sample_path = self.save_dir/f"sample-epoch={epoch}.jpg"
+    # @torch.inference_mode()
+    def test_sampling(self, epoch, model):
+        gen_image = model.sample(batch_size=self.test_label.size(0), label=self.test_label)
+        gen_grid = image_to_grid(gen_image, n_cols=int(self.test_label.size(0) ** 0.5))
+        sample_path = self.save_dir/f"epoch={epoch}-sample.jpg"
         save_image(gen_grid, save_path=sample_path)
         wandb.log({"Samples": wandb.Image(sample_path)}, step=epoch)
 
     def train(self, n_epochs, model, optim, scaler, n_warmup_steps):
-        for param in model.parameters():
-            try:
-                param.register_hook(lambda grad: torch.clip(grad, -1, 1))
-            except Exception:
-                continue
-
         model = torch.compile(model)
-        # self.ema = EMA(weight=0.995, model=model)
 
         self.scheduler = CosineLRScheduler(
             optimizer=optim,
@@ -179,35 +150,33 @@ class Trainer(object):
             train_loss = self.train_for_one_epoch(
                 epoch=epoch, model=model, optim=optim, scaler=scaler,
             )
-            # val_loss = self.validate(self.ema.ema_model)
             val_loss = self.validate(model)
             if val_loss < min_val_loss:
-                model_params_path = str(self.save_dir/f"epoch={epoch}-val_loss={val_loss:.4f}.pth")
-                # self.save_model_params(model=self.ema.ema_model, save_path=model_params_path)
+                model_params_path = str(
+                    self.save_dir/f"epoch={epoch}-val_loss={val_loss:.4f}.pth"
+                )
                 self.save_model_params(model=model, save_path=model_params_path)
                 min_val_loss = val_loss
 
             self.save_ckpt(
                 epoch=epoch,
-                # model=self.ema.ema_model,
                 model=model,
                 optim=optim,
                 min_val_loss=min_val_loss,
                 scaler=scaler,
             )
 
-            # self.test_sampling(epoch=epoch, model=self.ema.ema_model, batch_size=16)
-            self.test_sampling(epoch=epoch, model=model, batch_size=16)
+            self.test_sampling(epoch=epoch, model=model)
 
             log = f"[ {get_elapsed_time(start_time)} ]"
             log += f"[ {epoch}/{n_epochs} ]"
             log += f"[ Train loss: {train_loss:.4f} ]"
             log += f"[ Val loss: {val_loss:.4f} | Best: {min_val_loss:.4f} ]"
-            print(log)
             wandb.log(
                 {"Train loss": train_loss, "Val loss": val_loss, "Min val loss": min_val_loss},
                 step=epoch,
             )
+            print(log)
 
 
 def main():
@@ -226,21 +195,42 @@ def main():
 
     train_dl, val_dl = get_train_and_val_dls(
         data_dir=args.DATA_DIR,
-        img_size=args.IMG_SIZE,
         batch_size=args.BATCH_SIZE,
         n_cpus=args.N_CPUS,
+        seed=args.SEED,
     )
+    N_CLASSES = 10
     trainer = Trainer(
+        n_classes=N_CLASSES,
         train_dl=train_dl,
         val_dl=val_dl,
         save_dir=args.SAVE_DIR,
         device=DEVICE,
     )
 
-    net = UNet()
-    model = DDPM(model=net, img_size=args.IMG_SIZE, device=DEVICE)
+    unet = UNet(
+        n_classes=N_CLASSES,
+        channels=64,
+        channel_mults=[1, 2, 2, 2],
+        attns=[False, True, False, False],
+        n_res_blocks=2,
+    )
+    classifier = Classifier(
+        n_classes=N_CLASSES,
+        channels=64,
+        channel_mults=[1, 2, 2, 2],
+        attns=[False, True, False, False],
+        n_res_blocks=2,
+    ).to(DEVICE)
+    state_dict = torch.load(str(args.CLASSIFIER_PARAMS), map_location=DEVICE)
+    classifier.load_state_dict(state_dict)
+    model = ClassifierGuidedDiffusion(
+        unet=unet,
+        classifier=classifier,
+        img_size=args.IMG_SIZE,
+        device=DEVICE,
+    )
     print_n_params(model)
-    # "We set the batch size to 128 for CIFAR10 and 64 for larger images."
     optim = AdamW(model.parameters(), lr=args.LR)
     scaler = get_grad_scaler(device=DEVICE)
 

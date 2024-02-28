@@ -197,12 +197,30 @@ class Classifier(nn.Module):
             )
             return F.cross_entropy(pred, label, reduction="mean")
 
+    def get_acc(self, noisy_image, diffusion_step, label, k=1):
+        pred = self(
+            noisy_image=noisy_image,
+            diffusion_step=diffusion_step,
+            label=label,
+        )
+        _, top_k = torch.topk(pred, k=k, dim=1)
+        corr = torch.eq(top_k, label.unsqueeze(1).repeat(1, k))
+        acc = corr.sum(dim=1).float().mean().item()
+        return acc
+
 
 if __name__ == "__main__":
-    model = Classifier(n_classes=10)
+    classifier = Classifier(n_classes=10)
 
     noisy_image = torch.randn(4, 3, 32, 32)
     diffusion_step = torch.randint(0, 1000, size=(4,))
     label = torch.randint(0, 10, size=(4,))
-    out = model(noisy_image, diffusion_step, label)
-    out.shape
+
+    noisy_image.requires_grad = True
+    out = classifier(noisy_image, diffusion_step, label)
+    # noisy_image.requires_grad, diffusion_step.requires_grad, label.requires_grad, out.requires_grad
+
+    grad1 = torch.autograd.grad(out.sum(), noisy_image)[0]
+    grad1.sum()
+    # grad2 = torch.autograd.grad(out.mean(), noisy_image)[0]
+    # grad2.sum()
