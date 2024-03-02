@@ -59,13 +59,13 @@ class Trainer(object):
         self.save_dir = Path(save_dir)
         self.device = device
 
-        # self.run = wandb.init(project="Classifier-Guidance-Classifier")
+        self.run = wandb.init(project="Classifier-Guidance-Classifier")
 
         self.ckpt_path = self.save_dir/"ckpt.pth"
 
         self.test_label = torch.arange(
             self.n_classes, dtype=torch.int32, device=self.device,
-        ).repeat_interleave(10)
+        ).repeat_interleave(4)
 
     def train_for_one_epoch(self, epoch, model, optim, scaler):
         train_loss = 0
@@ -126,10 +126,11 @@ class Trainer(object):
     # @torch.inference_mode()
     def test_sampling(self, epoch, model):
         gen_image = model.sample(batch_size=self.test_label.size(0), label=self.test_label)
-        gen_grid = image_to_grid(gen_image, n_cols=int(self.test_label.size(0) ** 0.5))
-        sample_path = self.save_dir/f"epoch={epoch}-sample.jpg"
-        save_image(gen_grid, save_path=sample_path)
-        wandb.log({"Samples": wandb.Image(sample_path)}, step=epoch)
+        # gen_grid = image_to_grid(gen_image, n_cols=int(self.test_label.size(0) ** 0.5))
+        gen_grid = image_to_grid(gen_image, n_cols=4)
+        save_path = str(self.save_dir/f"epoch={epoch}-sample.jpg")
+        save_image(gen_grid, save_path=save_path)
+        wandb.log({"Samples": wandb.Image(save_path)}, step=epoch)
 
     def train(self, n_epochs, model, optim, scaler, n_warmup_steps):
         model = torch.compile(model)
@@ -210,7 +211,7 @@ def main():
 
     unet = UNet(
         n_classes=N_CLASSES,
-        channels=64,
+        channels=128,
         channel_mults=[1, 2, 2, 2],
         attns=[False, True, False, False],
         n_res_blocks=2,

@@ -25,7 +25,7 @@ class ClassifierGuidedDiffusion(nn.Module):
         classifier,
         img_size,
         device,
-        classifier_scale=10,
+        classifier_scale=0,
         image_channels=3,
         n_diffusion_steps=1000,
         init_beta=0.0001,
