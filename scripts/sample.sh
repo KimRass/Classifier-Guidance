@@ -10,5 +10,5 @@ classifier_scale=20
 python3 ../sample.py\
     --model_params="/Users/jongbeomkim/Documents/classifier-guidance/unet_channels=128/epoch=28-val_loss=0.0303.pth"\
     --classifier_scale=$classifier_scale\
-    --batch_size=4\
+    --batch_size=10\
     --img_size=$img_size
