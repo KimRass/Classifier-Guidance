@@ -48,7 +48,7 @@ def get_max_sample_num(samples_dir, pref):
 def pref_to_save_path(samples_dir, pref, suffix):
     max_sample_num = get_max_sample_num(samples_dir, pref=pref)
     save_stem = f"{pref}-{max_sample_num + 1}"
-    return str((Path(samples_dir)/save_stem).with_suffix(suffix))
+    return f"{Path(samples_dir)/save_stem}{suffix}"
 
 
 def get_save_path(samples_dir, classifier_scale):
@@ -96,11 +96,11 @@ def main():
 
     SAMPLES_DIR = Path(__file__).resolve().parent/"samples"
     test_label = torch.arange(
-        N_CLASSES, dtype=torch.int32, device=DEVICE,
+        N_CLASSES, dtype=torch.long, device=DEVICE,
     ).repeat_interleave(args.BATCH_SIZE)
     gen_image = model.sample(batch_size=test_label.size(0), label=test_label)
     gen_grid = image_to_grid(gen_image, n_cols=args.BATCH_SIZE)
-    gen_grid.show()
+    # gen_grid.show()
     save_path = get_save_path(
         samples_dir=SAMPLES_DIR, classifier_scale=args.CLASSIFIER_SCALE,
     )

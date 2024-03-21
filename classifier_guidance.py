@@ -100,7 +100,7 @@ class ClassifierGuidedDiffusion(nn.Module):
             )
             return F.mse_loss(pred_noise, rand_noise, reduction="mean")
 
-    # @torch.enable_grad()
+    @torch.enable_grad()
     def get_classifier_grad(self, noisy_image, diffusion_step, label):
         # with torch.enable_grad():
         # x_in = noisy_image.detach().requires_grad_(True)
@@ -112,7 +112,7 @@ class ClassifierGuidedDiffusion(nn.Module):
             label=label,
         )
         log_prob = F.log_softmax(out, dim=-1)
-        selected = log_prob[range(log_prob.size(0)), label]
+        selected = log_prob[torch.arange(log_prob.size(0), dtype=torch.long), label.long()]
         # "$\nabla_{x_{t}}\log{p_{\phi}}(y \vert x)$"
         return torch.autograd.grad(outputs=selected.sum(), inputs=noisy_image)[0]
 
