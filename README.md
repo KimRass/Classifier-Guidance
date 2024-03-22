@@ -2,9 +2,9 @@
 - [classifier_guidance-cifar10.pth](https://drive.google.com/file/d/1MaCkJPspB-U-2H_Sug1CdReQXilHppfP/view?usp=sharing)
 
 # 2. Samples
-| `classifier_scale=20` |
-|:-:|
-| <img src="https://github.com/KimRass/KimRass/assets/67457712/bd878804-13b8-4b18-a345-c6da1f6b6321" width="250"> |
+| `classifier_scale=30.0` | `classifier_scale=200.0` |
+|:-:|:-:|
+| <img src="https://github.com/KimRass/KimRass/assets/67457712/69992f95-b62c-45be-b583-69cd173e5480" width="300"> | <img src="https://github.com/KimRass/KimRass/assets/67457712/c55cb347-043c-4d41-a66f-f5f6f345c0c5" width="300"> |
 
 # 3. Theoretical Background
 $$x_{t - 1} \leftarrow \text{sample from } \mathcal{N}(\mu + s\Sigma\nabla_{x_{t}}\log{p_{\phi}}(y \vert x), \Sigma)$$
