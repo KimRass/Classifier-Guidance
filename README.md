@@ -5,6 +5,7 @@
 | `classifier_scale=30.0` | `classifier_scale=200.0` |
 |:-:|:-:|
 | <img src="https://github.com/KimRass/KimRass/assets/67457712/69992f95-b62c-45be-b583-69cd173e5480" width="400"> | <img src="https://github.com/KimRass/KimRass/assets/67457712/c55cb347-043c-4d41-a66f-f5f6f345c0c5" width="400"> |
+- The classes are "airplane", "automobile", "bird", "cat", "deer", "dog", "frog", "hose", "ship" and "truck" respectively.
 
 # 3. Theoretical Background
 $$x_{t - 1} \leftarrow \text{sample from } \mathcal{N}(\mu + s\Sigma\nabla_{x_{t}}\log{p_{\phi}}(y \vert x), \Sigma)$$
